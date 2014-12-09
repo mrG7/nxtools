@@ -1,20 +1,18 @@
-#!/usr/bin/env ipython
+#!/usr/bin/env python
 import sys, os
 import argparse
-import requests
-import json
 import networkx as nx
 import numpy as np
 import scipy.io as scio
-from xgmml_networkx import XGMMLWriter
-from convnetx import *
+from useful import system, which
 
-def grangerNetwork(matfile, fn_out, threshold=1, pvalname='GCpvalB', weightname='GCdevB', clustername='clustersB', bciunits = 'brainunits'):
+def grangerNetwork(matfile, fn_out, pvalname='GCpvalB', weightname='GCdevB', clustername='clustersB', bciunits = 'brainunits'):
 	#Load mat file
 	a = scio.loadmat(matfile)
 	weights = a[weightname]
 	pvals = a[pvalname]
 	names = [str(name[0]) for name in a['unitnames'][0]]
+	#Add info about whether node was used in the BCI or not
 	bci = [str(name[0]) for name in a[bciunits][0]]
 	usedinbci = [int(u in bci) for u in names]
 	clusters = a[clustername][0]
@@ -39,8 +37,7 @@ def grangerNetwork(matfile, fn_out, threshold=1, pvalname='GCpvalB', weightname=
 	sumrows = weights.sum(1)
 	for i in range(nU):
 		directionality[i] = sumcols[i]-sumrows[i]
-	#Add info about whether node was used in the BCI or not
-	##
+	#Rounding digits appears to resolve strange issue with graphml file (smaller file size?)
 	round_to_n = lambda x, n: round(x, -int(np.floor(np.log10(x))) + (n - 1))
 	[g.add_node(i, cluster = float(nodeclusters[i+1]), unitname = names[i], dirs=float(directionality[i]), bci=usedinbci[i]) for i in range(nU)]
 	for i in range(nU):
@@ -49,33 +46,78 @@ def grangerNetwork(matfile, fn_out, threshold=1, pvalname='GCpvalB', weightname=
 				g.add_edge(i,j, weight=round_to_n(float(weights[i,j]),4), pval=round_to_n(float(pvals[i,j]),4))
 	#Write to graphml file
 	nx.write_graphml(g, fn_out, prettyprint = False);
-	#fn_out = fn_out + '.gml'
-	#nx.write_gml(g, fn_out)
-	#to_sif(g, fn_out)
-	#to_graphml(g, fn_out)
-	#to_gexf(g, fn_out)
 
 def runGranger():
 	matfile = './GLMGrangerB.mat'; fn_out = './GLMGrangerB.xml';
-	grangerNetwork(matfile, fn_out, threshold=1, pvalname='GCpvalB', weightname='GCdevB', clustername='clustersB', bciunits = 'brainunits')
+	grangerNetwork(matfile, fn_out, pvalname='GCpvalB', weightname='GCdevB', clustername='clustersB', bciunits = 'brainunits')
 	matfile = './GLMGrangerBP.mat'; fn_out = './GLMGrangerBP.xml';
-	grangerNetwork(matfile, fn_out, threshold=1, pvalname='GCpvalBP', weightname='GCdevBP', clustername='clustersBP', bciunits = 'brainunits')
+	grangerNetwork(matfile, fn_out, pvalname='GCpvalBP', weightname='GCdevBP', clustername='clustersBP', bciunits = 'brainunits')
 	matfile = './GLMGrangerM.mat'; fn_out = './GLMGrangerM.xml';
-	grangerNetwork(matfile, fn_out, threshold=1, pvalname='GCpvalM', weightname='GCdevM', clustername='clustersM', bciunits = 'manualunits')
+	grangerNetwork(matfile, fn_out, pvalname='GCpvalM', weightname='GCdevM', clustername='clustersM', bciunits = 'manualunits')
 	matfile = './GLMGrangerMP.mat'; fn_out = './GLMGrangerMP.xml';
-	grangerNetwork(matfile, fn_out, threshold=1, pvalname='GCpvalMP', weightname='GCdevMP', clustername='clustersMP', bciunits = 'manualunits')
+	grangerNetwork(matfile, fn_out, pvalname='GCpvalMP', weightname='GCdevMP', clustername='clustersMP', bciunits = 'manualunits')
+
+def runCytoscape(fn_graphml, fn_image):
+	#Check if cytoscape.sh is present, if not then exit
+	if not which('cytoscape.sh'):
+		return None 
+
+	fn_out = './tmp.cy'
+	fn_style = '/home/lansdell/projects/bci/matlab/eval/GrangerStyle.xml'
+	fn_attr = fn_image + 'attr'
+	fn_circ = fn_image + 'circ'
+
+	#Generate script 
+	script = """#Import network
+network import file indexColumnTargetInteraction=1 indexColumnSourceInteraction=2 file="%s"
+#Import and set style
+vizmap load file file="%s"
+vizmap apply styles=DirectedGranger
+#Set layout to attributes
+layout attributes-layout NodeAttribute=cluster maxwidth=400
+#Set view to fit display
+view fit content
+#Save 
+view export OutputFile="%s" options=PDF
+#Set layout to cirlce
+layout attribute-circle
+#Set view to fit display
+view fit content
+#Save 
+view export OutputFile="%s" options=PDF
+#Quit
+command quit
+	""" % (fn_graphml, fn_style, fn_attr, fn_circ)
+
+	print script
+
+	with open(fn_out, 'w') as f_out:
+		f_out.write(script)
+
+	#Run cytoscape
+	cmd = 'cytoscape.sh -S ' + fn_out
+	system(cmd)
 
 def main(argv):
-    usage = """networkx_granger.py <matfile> <xmlfile> --threshold [val] --matname [name]
+    usage = """networkx_granger.py <matfile> <pdffile> --weightname [name] 
+                --pvalname [name] --clustername [name] --bciunits [name]
 
 	Create networkx object from clustered Granger causality code
 
-	Requires a .mat file containing a square matrix (by default named GCpval) which contains
-	the p-values testing for Granger causality. The entry in row i and column j
-	indicates unit i's "G-causal effect" on unit j.	    
+	Requires a .mat file containing:
 
-	Writes to xml file for importing into cytoscape.
+	- A square NxN matrix which contains the weights for each edge. The entry in row i
+	 and column j indicates unit i's "G-causal effect" on unit j.
+ 	- A NxN matrix with the p-values testing for Granger causality
+ 	- A cell array containing lists of integers specifying units within the same cluster
+ 	- A cell array containing strings specifying names of units were used in BCI control
+
+ 	Variables names are specified by the command line arguments.
+
+	Writes to graphml file for importing into cytoscape.
    
+	If cytoscape.sh is in path will generate and run a cytoscape script to plot the network.
+
     Ben Lansdell: ben.lansdell@gmail.com
     2014
     """
@@ -83,13 +125,20 @@ def main(argv):
     parser.add_argument('matfile', type=str,
         help='matfile containing Granger causality data')
     parser.add_argument('fn_out', type=str,
-        help='filename for output XML file')
-    parser.add_argument('--threshold', type=float, default=1.0,
-        help='threshold p-value above which to ignore connection')
-    parser.add_argument('--matname', type=str, default='GCpval',
-        help='name of matrix within mat file to plot')
+        help='filename for output pdf file')
+    parser.add_argument('--weightname', type=str, default='GCdevB',
+        help='name of weight matrix within mat file to plot')
+    parser.add_argument('--pvalname', type=str, default='GCpvalB',
+        help='name of pval matrix within mat file to plot')
+    parser.add_argument('--clustername', type=str, default='clustersB',
+        help='name of cluster cell array within mat file to plot')
+    parser.add_argument('--bciunits', type=str, default='brainunits',
+        help='name of cell array listing BCI units within mat file to plot')
     args = parser.parse_args()
-    grangerNetwork(args.matfile, args.fn_out, args.threshold, args.matname)
+    xml_out_rel = './tmp.xml'
+    xml_out_abs = os.path.abspath(xml_out_rel)
+    grangerNetwork(args.matfile, xml_out_abs, args.pvalname, args.weightname, args.clustername, args.bciunits)
+    runCytoscape(xml_out_abs, args.fn_out)
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv))
